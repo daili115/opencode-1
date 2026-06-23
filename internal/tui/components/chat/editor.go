@@ -31,6 +31,7 @@ type editorCmp struct {
 	textarea    textarea.Model
 	attachments []message.Attachment
 	deleteMode  bool
+	apiUsage    *apiUsageCmp
 }
 
 type EditorKeyMaps struct {
@@ -43,6 +44,7 @@ type bluredEditorKeyMaps struct {
 	Focus      key.Binding
 	OpenEditor key.Binding
 }
+
 type DeleteAttachmentKeyMaps struct {
 	AttachmentDeleteMode key.Binding
 	Escape               key.Binding
@@ -84,7 +86,6 @@ func (m *editorCmp) openEditor() tea.Cmd {
 	if editor == "" {
 		editor = "nvim"
 	}
-
 	tmpfile, err := os.CreateTemp("", "msg_*.md")
 	if err != nil {
 		return util.ReportError(err)
@@ -123,11 +124,9 @@ func (m *editorCmp) send() tea.Cmd {
 	if m.app.CoderAgent.IsSessionBusy(m.session.ID) {
 		return util.ReportWarn("Agent is working, please wait...")
 	}
-
 	value := m.textarea.Value()
 	m.textarea.Reset()
 	attachments := m.attachments
-
 	m.attachments = nil
 	if value == "" {
 		return nil
@@ -148,7 +147,6 @@ func (m *editorCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case dialog.CompletionSelectedMsg:
 		existingValue := m.textarea.Value()
 		modifiedValue := strings.Replace(existingValue, msg.SearchString, msg.CompletionValue, 1)
-
 		m.textarea.SetValue(modifiedValue)
 		return m, nil
 	case SessionSelectedMsg:
@@ -162,6 +160,9 @@ func (m *editorCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		}
 		m.attachments = append(m.attachments, msg.Attachment)
+	case APIUsageMsg:
+		_, cmd := m.apiUsage.Update(msg)
+		return m, cmd
 	case tea.KeyMsg:
 		if key.Matches(msg, DeleteKeyMaps.AttachmentDeleteMode) {
 			m.deleteMode = true
@@ -210,7 +211,6 @@ func (m *editorCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, m.send()
 			}
 		}
-
 	}
 	m.textarea, cmd = m.textarea.Update(msg)
 	return m, cmd
@@ -218,30 +218,43 @@ func (m *editorCmp) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m *editorCmp) View() string {
 	t := theme.CurrentTheme()
-
 	// Style the prompt with theme colors
 	style := lipgloss.NewStyle().
 		Padding(0, 0, 0, 1).
 		Bold(true).
 		Foreground(t.Primary())
 
+	var editorView string
 	if len(m.attachments) == 0 {
-		return lipgloss.JoinHorizontal(lipgloss.Top, style.Render(">"), m.textarea.View())
+		editorView = lipgloss.JoinHorizontal(lipgloss.Top, style.Render(">"), m.textarea.View())
+	} else {
+		m.textarea.SetHeight(m.height - 1)
+		editorView = lipgloss.JoinVertical(lipgloss.Top,
+			m.attachmentsContent(),
+			lipgloss.JoinHorizontal(lipgloss.Top, style.Render(">"),
+				m.textarea.View()),
+		)
 	}
-	m.textarea.SetHeight(m.height - 1)
-	return lipgloss.JoinVertical(lipgloss.Top,
-		m.attachmentsContent(),
-		lipgloss.JoinHorizontal(lipgloss.Top, style.Render(">"),
-			m.textarea.View()),
-	)
+
+	// Add API usage statistics
+	apiUsageView := m.apiUsage.View()
+	if apiUsageView != "" {
+		return lipgloss.JoinVertical(lipgloss.Top,
+			editorView,
+			apiUsageView,
+		)
+	}
+
+	return editorView
 }
 
 func (m *editorCmp) SetSize(width, height int) tea.Cmd {
 	m.width = width
 	m.height = height
 	m.textarea.SetWidth(width - 3) // account for the prompt and padding right
-	m.textarea.SetHeight(height)
+	m.textarea.SetHeight(height - 3) // Reserve space for API usage stats
 	m.textarea.SetWidth(width)
+	m.apiUsage.SetSize(width, 3)
 	return nil
 }
 
@@ -276,6 +289,7 @@ func (m *editorCmp) BindingKeys() []key.Binding {
 	bindings := []key.Binding{}
 	bindings = append(bindings, layout.KeyMapToSlice(editorMaps)...)
 	bindings = append(bindings, layout.KeyMapToSlice(DeleteKeyMaps)...)
+	bindings = append(bindings, m.apiUsage.BindingKeys()...)
 	return bindings
 }
 
@@ -284,7 +298,6 @@ func CreateTextArea(existing *textarea.Model) textarea.Model {
 	bgColor := t.Background()
 	textColor := t.Text()
 	textMutedColor := t.TextMuted()
-
 	ta := textarea.New()
 	ta.BlurredStyle.Base = styles.BaseStyle().Background(bgColor).Foreground(textColor)
 	ta.BlurredStyle.CursorLine = styles.BaseStyle().Background(bgColor)
@@ -294,17 +307,14 @@ func CreateTextArea(existing *textarea.Model) textarea.Model {
 	ta.FocusedStyle.CursorLine = styles.BaseStyle().Background(bgColor)
 	ta.FocusedStyle.Placeholder = styles.BaseStyle().Background(bgColor).Foreground(textMutedColor)
 	ta.FocusedStyle.Text = styles.BaseStyle().Background(bgColor).Foreground(textColor)
-
 	ta.Prompt = " "
 	ta.ShowLineNumbers = false
 	ta.CharLimit = -1
-
 	if existing != nil {
 		ta.SetValue(existing.Value())
 		ta.SetWidth(existing.Width())
 		ta.SetHeight(existing.Height())
 	}
-
 	ta.Focus()
 	return ta
 }
@@ -314,5 +324,6 @@ func NewEditorCmp(app *app.App) tea.Model {
 	return &editorCmp{
 		app:      app,
 		textarea: ta,
+		apiUsage: NewAPIUsageCmp().(*apiUsageCmp),
 	}
 }
